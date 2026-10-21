@@ -1,0 +1,46 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+backend/.venv/
+backend/venv/
+backend/env/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test, type-checker, and linter caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build/package output
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Local editor/OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

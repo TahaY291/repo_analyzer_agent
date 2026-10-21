@@ -1,0 +1,19 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# os
+.DS_Store
+Thumbs.db
+
+# future frontend or tooling
+node_modules/
