@@ -1,214 +1,216 @@
-# Repo Investigator
+Repo Investigator
+An AI agent that investigates a public GitHub repository and produces a structured report. Give it a repository URL and an optional focus question, such as “How does authentication work?” It explores the code with tools, records findings and execution traces, and can resume an interrupted run from its last checkpoint.
 
-An agent that investigates a GitHub repository for you. Give it a repo URL and an optional focus ("how does authentication work?"). It explores the repo with tools, takes notes as it goes, and writes a structured report. Every step is traced in the database, and a run that gets interrupted can be resumed from its last checkpoint.
-
-I built it as a small system to get the runtime right, not just the prompt: an agent loop, persistent state, real tool execution, tracing, and failure handling.
-
-## What it does
-
-- `POST` a public GitHub URL and an optional focus. You get an id back immediately (`202`), and the work continues in the background.
-- The agent lists folders, reads files in chunks, searches inside files, and writes one finding per file part it reads.
-- It stops when it has enough evidence, or when a hard limit is hit (steps or tokens), and then writes the final report.
-- With a focus, the report answers it and says whether it was fully answered, partly answered, or not found. Without one, it is a general overview.
-- You can poll the status, read the full step-by-step trace, and resume a run that was interrupted.
-
-## Architecture
-
+The project focuses on reliable agent execution—not just prompting—including tool execution, persistent state, tracing, limits, and failure recovery.
+Features
+- Start an investigation asynchronously and receive a run ID immediately (202 Accepted).
+- Explore repository folders, read files in chunks, and search within files.
+- Record findings and a step-by-step trace in PostgreSQL.
+- Poll run status and inspect the trace.
+- Resume interrupted or failed runs from a saved checkpoint.
+- Generate a focused report that says whether the question was fully answered, partly answered, or not found.
+- Enforce step and token limits in code.
+Tech Stack
+- API: FastAPI, Pydantic
+- Agent workflow: LangGraph, langchain-groq
+- Database: PostgreSQL, SQLAlchemy (async), Alembic
+- Cache/service dependency: Redis
+- GitHub access: GitHub API, httpx
+- Runtime: Docker Compose
+Architecture
 ```mermaid
 flowchart LR
     C[Client] -->|POST /investigations| API[FastAPI]
-    API -->|row: pending| DB[(Postgres)]
-    API -->|background task| RUN[Runner]
+    API -->|Create pending row| DB[(PostgreSQL)]
+    API -->|Schedule background task| RUN[Runner]
     RUN --> AG[LangGraph agent]
-    AG -->|checkpoint after every node| DB
-    RUN -->|trace row after every node| DB
-    AG -->|tools| GH[GitHub API]
-    AG -->|LLM calls| LLM[Groq]
-    C -->|GET status / trace| API
+    AG -->|Checkpoint after each node| DB
+    RUN -->|Trace row after each node| DB
+    AG -->|Repository tools| GH[GitHub API]
+    AG -->|Model calls| LLM[Groq]
+    C -->|Poll status or trace| API
     C -->|POST resume| API
 ```
-
-The agent graph:
-
+Agent workflow
 ```mermaid
 flowchart TD
-    S([start]) --> F[fetch_tree: plain code]
-    F --> C[choose_tool: LLM picks one tool call]
-    C -->|tool call| T[tools: plain code]
-    C -->|model failed| R
-    T --> E[evaluate: LLM writes a finding and decides]
-    E -->|keep going| C
-    E -->|enough evidence or limit hit| R[write_report: LLM]
-    R --> D([end])
+    S([Start]) --> F[fetch_tree: plain Python]
+    F --> C[choose_tool: LLM selects one tool]
+    C -->|Tool call selected| T[Execute tool: plain Python]
+    C -->|Model error| R[write_report: LLM]
+    T --> E[evaluate: LLM creates finding and decides]
+    E -->|Continue| C
+    E -->|Enough evidence or limit reached| R
+    R --> D([End])
 ```
-
-### Layout
-
-```
+How an Investigation Works
+1. Create: The API validates the repository URL, stores an investigations row with pending status, schedules the runner, and returns 202 with the run ID.
+2. Start: The runner marks the investigation running and streams the graph. After each node, it writes a trace_steps row and updates investigation counters.
+3. Fetch repository tree: fetch_tree retrieves repository metadata and the file tree without an LLM call.
+4. Choose a tool: choose_tool gives the model the focus question, repository information, existing findings, and files already read. The model selects exactly one tool call; it does not execute the tool itself.
+5. Execute the tool: Plain Python calls the GitHub API through the selected tool.
+6. Evaluate: The model turns the newly read file part into a concise finding and decides whether more evidence is needed. After a directory listing, search, or error, there may be nothing to summarize, so the model call is skipped.
+7. Enforce limits: Python enforces the step limit and token budget. The model's decision to stop is also considered, but it cannot bypass hard limits.
+8. Write the report: The model builds a report from findings. Facts such as files read, step counts, and stop reason are added by code.
+9. Complete: The runner stores the report and marks the investigation completed.
+Repository Layout
 backend/
-  main.py                  app, lifespan (opens the checkpointer, marks dead runs interrupted)
-  app/
-    agent/
-      graph.py             builds the graph, initial state
-      nodes/               first_node (fetch_tree), second_node (choose_tool),
-                           third_node (evaluate), final_node (write_report)
-      tools.py             list_directory, read_repository_file, search_in_file
-      github_client.py     GitHub API client: retries, error mapping, chunked reads
-      llm.py               model calls: rate-limit waits, JSON output, tool-call retries
-      checkpoint.py        the only place that knows checkpoints live in Postgres
-      prompts.py           all prompts
-      state.py             the agent state
-    investigations/        models, router, service (the background runner)
-  migrations/              Alembic
-  tests/
-```
+├── main.py
+├── app/
+│   ├── agent/
+│   │   ├── graph.py
+│   │   ├── nodes/
+│   │   │   ├── first_node.py
+│   │   │   ├── second_node.py
+│   │   │   ├── third_node.py
+│   │   │   └── final_node.py
+│   │   ├── tools.py
+│   │   ├── github_client.py
+│   │   ├── llm.py
+│   │   ├── checkpoint.py
+│   │   ├── prompts.py
+│   │   ├── state.py
+│   │   └── tree_view.py
+│   ├── auth/
+│   ├── core/
+│   └── investigations/
+├── migrations/
+├── scripts/
+├── docs/
+├── Dockerfile
+├── .dockerignore
+├── .env.example
+└── requirements.txt
+docker-compose.yml
+README.md
+Key modules:
+- graph.py builds the LangGraph workflow.
+- nodes/ contains the fetch, tool-selection, evaluation, and report-writing nodes.
+- tools.py implements directory listing, chunked file reading, and in-file search.
+- github_client.py handles GitHub API calls, retries, error mapping, and chunked reads.
+- llm.py handles model calls, rate-limit waits, JSON output, and tool-call retries.
+- checkpoint.py centralizes the PostgreSQL checkpoint configuration.
+- investigations/ contains the API routes, models, service, and background runner.
+- migrations/ contains Alembic migrations.
+Tools
+Tool	Purpose
+list_directory	Lists a folder using the repository tree already stored in state; no additional network call is needed.
+read_repository_file	Reads a file in chunks and returns information needed to request the next chunk.
+search_in_file	Finds a name or phrase in a file and returns line numbers and character offsets to help the agent jump to the relevant chunk.
 
-## How one run works
 
-1. **Create.** The endpoint validates the URL, stores an `investigations` row as `pending`, schedules the runner, and returns `202` with the id.
-2. **Run.** The runner marks the row `running` and streams the graph. After every node it writes a `trace_steps` row and updates the counters on the investigation.
-3. **fetch_tree** (no LLM). Fetches repo metadata and the file tree.
-4. **choose_tool** (LLM). Sees the focus, repo info, findings so far, and which files were read. It must return exactly one tool call. It cannot execute anything.
-5. **tools** (no LLM). Runs the chosen tool against the GitHub API.
-6. **evaluate** (LLM). Turns the file part that was just read into a short finding, decides to keep going or stop, and suggests what to look at next. After a listing, a search, or an error there is nothing to summarize, so it skips the model call.
-7. **Limits** are plain Python in `evaluate`: step limit, token budget, then the model's own "done". The model can never keep the loop alive.
-8. **write_report** (LLM). Builds the report from the findings only. Facts that can be computed (files read, steps, stop reason) are added by code, not by the model.
-9. The runner stores the report and sets the status to `completed`.
+The model chooses paths and offsets. The repository, branch, and current state come from the investigation itself (InjectedState), preventing a tool call from switching to another repository.
+State, Checkpoints, and Recovery
+The application stores three different kinds of data:
+Record	Purpose	Contents	Lifetime
+investigations	Represents the investigation	Status, report, findings, token totals	Permanent
+trace_steps	Explains what happened	One row per node: thought, tool, input, output preview, tokens, duration, and errors	Permanent, append-only
+LangGraph checkpoints	Allows a run to continue	Full state after each node and the next node to execute	Disposable
 
-### Tools
 
-| Tool | What it does |
-|---|---|
-| `list_directory` | Lists one folder. Works from the tree already in state, so no network call |
-| `read_repository_file` | Reads a file in chunks. The result says where it ended and what offset to use for the next part |
-| `search_in_file` | Finds where a name appears in one file and returns line numbers and character offsets, so the agent can jump to the right chunk |
+A useful analogy: the trace is the recording of what happened, while the checkpoint is the save file used to continue.
+Resume behavior
+- On startup, runs still marked pending or running are marked interrupted.
+- POST /api/v1/investigations/{id}/resume loads the last checkpoint and continues from the next node.
+- The service claims a run with one atomic UPDATE ... WHERE status IN ('interrupted','failed'), preventing two requests from starting the same run at once.
+- A resume trace row marks each restart seam, and step numbering continues from the saved progress.
+- If the server dies in the middle of a node, that node runs again from its start. This is safe for the current read-only tools, although the model call may be paid for again.
+I tested recovery by stopping the server twice during a run and resuming each time. In that test, fetch_tree ran once, the trace showed two resume rows, step numbers remained continuous, and the investigation completed.
+Tracing
+Every node writes a row to trace_steps, including fields such as:
 
-The model only chooses paths and offsets. The repo, branch, and state come from the run itself (`InjectedState`), so it cannot wander to another repository.
+step, node, thought, tool_called, tool_input, tool_output (preview only), output_chars, is_error, duration_ms, tokens_in, and tokens_out.
 
-## State, checkpoints, and recovery
+GET /api/v1/investigations/{id}/trace?after=N returns trace rows after step N, allowing a client to poll for new steps. Evaluation rows record the finding, whether the agent chose to continue or stop, and what it plans to inspect next.
+Failure Handling
+Failure	Behavior
+GitHub server error or network failure	Retries three times with exponential backoff, then returns a clear error.
+Repository not found or private	Raises RepoNotFound; the run ends as failed with a readable message.
+GitHub rate limit	Raises RateLimited with the reset time; the run can be resumed later.
+LLM provider rate limit (429)	Waits according to the provider's requested delay, up to four attempts, then fails with a retryable message.
+Unknown tool or invalid JSON from the model	Retries with a changed prompt.
+Repeated failure in choose_tool	Moves to report writing with stop_reason = model_error, allowing a partial report.
+Binary or very large file	Binary files are refused; large files are read in chunks.
+Server restart	The run becomes interrupted and can be resumed.
+Agent loop does not stop	Python-enforced step and token limits stop it.
 
-Three different kinds of saved data, on purpose:
 
-| | Purpose | Contents | Lifetime |
-|---|---|---|---|
-| `investigations` row | the product | status, report, findings, token totals | permanent |
-| `trace_steps` | people reading what happened | one row per node: thought, tool, input, output preview, tokens, duration, errors | permanent, append-only |
-| LangGraph checkpoints | the machine continuing a run | the full state after every node, plus what runs next | disposable |
+Design Decisions
+- The LLM chooses; code executes. Tool calls are executed by plain Python. Tools can be tested independently, and the model is restricted to the available tool list.
+- Hard limits live outside the model. Stopping combines model judgment with enforced rules; the rules take precedence.
+- Findings, not raw files, carry the state. After a file part is summarized, its text in the message history is replaced with a short stub to keep token use from growing with every read.
+- A file counts as read only when it produces a finding. A failed evaluation does not mark it as completed.
+- PostgreSQL stores checkpoints. Checkpoints are durable and inspectable with SQL. The configuration is centralized in checkpoint.py, so changing the storage backend later is localized.
+- Trace and checkpoint data are separate. One explains execution to a person; the other allows execution to continue.
+- Two model-output modes are used. Tool selection uses provider tool calling. Findings and reports use JSON validated with Pydantic because the structured-output path was unreliable with this model.
+Measured Behavior
+On pallets/click, a run used approximately 21K–32K input tokens and 4K output tokens, with 8–11 tool rounds and 4–5 findings.
 
-The trace is the security-camera footage and the checkpoint is the save file. You watch one to understand a run and load the other to continue it.
+Early traces showed some model calls taking 10–30 seconds while generating only a few hundred tokens, compared with about 1–2 seconds for similar calls. Server logs showed provider 429 responses followed by SDK waits of 16, 22, and 44 seconds. On the free tier, the token-per-minute limit—not repository exploration—can dominate runtime. Calls are now wrapped so waits are explicit and bounded.
+API
+All investigation routes are under /api/v1 and require a logged-in user. Authentication routes are available in /docs.
+Method	Endpoint	Description
+POST	/investigations	Starts a run. Body: repo_url and optional focus. Returns 202 and the run ID.
+GET	/investigations	Lists your recent runs.
+GET	/investigations/{id}	Returns status, counters, errors, and the report when complete.
+GET	/investigations/{id}/trace?after=N	Returns trace rows after step N.
+POST	/investigations/{id}/resume	Resumes an interrupted or failed run; returns 409 if it cannot be resumed.
 
-**Resume.** On startup, any run still marked `pending` or `running` was killed by a restart, so it is marked `interrupted`. `POST /investigations/{id}/resume` loads the last checkpoint and continues from the next node. It claims the run with one atomic `UPDATE ... WHERE status IN ('interrupted','failed')`, so two clicks cannot start two agents on the same run. The trace shows a `resume` row at each seam and keeps counting steps from where it stopped.
 
-If the server dies in the middle of a node, that node runs again from its start. That is safe here because every tool only reads.
+Possible statuses: pending, running, completed, failed, and interrupted.
+Getting Started
+Prerequisites
+- Docker Desktop with Docker Compose
+- A Groq API key
+- A GitHub token is optional; without one, GitHub's unauthenticated API limit is 60 requests per hour
+Run with Docker
+1. Clone the repository:
+   git clone https://github.com/TahaY291/repo_analyzer_agent.git
+   cd repo_analyzer_agent
+2. Create your local environment file:
+   cp backend/.env.example backend/.env
+   On Windows PowerShell, use:
+   Copy-Item backend/.env.example backend/.env
+3. Edit backend/.env. Add GROQ_API_KEY and set the required token secrets. Do not commit this file.
+4. Build and start the services:
+   docker compose up --build
+This starts PostgreSQL and Redis, applies database migrations, and serves the API on http://localhost:8000. Open the interactive API docs at http://localhost:8000/docs.
 
-I tested it by stopping the server twice during one run and resuming each time: `fetch_tree` ran once, the trace shows two `resume` rows, step numbers are continuous, and the run completed.
-
-## Tracing
-
-Every node writes a row to `trace_steps`:
-
-`step`, `node`, `thought`, `tool_called`, `tool_input`, `tool_output` (a preview, never whole files), `output_chars`, `is_error`, `duration_ms`, `tokens_in`, `tokens_out`.
-
-`GET /api/v1/investigations/{id}/trace?after=N` returns only the rows after step N, so a client can poll for new steps. The evaluate rows record the finding, whether the agent decided to continue or stop, and what it plans to look at next.
-
-## Failure handling
-
-| What goes wrong | What happens |
-|---|---|
-| GitHub 5xx or network error | 3 attempts with exponential backoff, then a clear "GitHub is not responding" error |
-| Repo not found or private | `RepoNotFound`, run ends `failed` with a readable message |
-| GitHub rate limit | `RateLimited` with the reset time. The run ends `failed` and can be resumed later |
-| LLM provider rate limit (429) | Waits as long as the provider asks, up to 4 attempts, then fails with "busy, try again" and can be resumed |
-| Model calls a tool that does not exist, or returns invalid JSON | Retried with a changed prompt (at temperature 0 the same input gives the same output) |
-| Model keeps failing in `choose_tool` | The graph goes to `write_report` with `stop_reason = model_error`, so the user gets a partial report |
-| Binary or huge files | Binary files are refused. Large files are read in chunks |
-| Server restart | The run becomes `interrupted` and can be resumed |
-| Loop that never ends | Step limit and token budget, both enforced in code |
-
-## Design decisions
-
-- **The LLM chooses, code executes.** The model returns a tool call and plain code runs it. Tools can be tested without a model, and the model cannot do anything outside the tool list.
-- **Limits live outside the model.** Whether to stop is a mix of model judgment and hard rules, and the hard rules win.
-- **Findings, not raw files, carry the state.** After a file is summarized, its text in the message history is replaced with a short stub, so token use does not grow with every file read.
-- **A file counts as "read" only if it produced a finding.** A failed evaluation does not mark it done.
-- **Postgres for checkpoints, not Redis.** Durable by default, inspectable with SQL, one database for everything. The choice lives in one function (`checkpoint.py`), so moving to Redis later changes only that file.
-- **Trace and checkpoint are separate.** One is for reading, one is for continuing, and they need different data.
-- **Two model modes.** Tool calls use the provider's tool calling. The JSON outputs (findings, report) ask for plain JSON and validate it with Pydantic, because the structured-output path was unreliable with this model (it sometimes invented tool names).
-
-## Measured behavior
-
-On `pallets/click`: about 21K to 32K input tokens and about 4K output tokens per run, 8 to 11 tool rounds, 4 to 5 findings.
-
-Early traces showed some model calls taking 10 to 30 seconds while producing only a few hundred tokens, against about 1 to 2 seconds for similar calls. The server log showed why: the provider answered `429` and its SDK waited 16, 22, and 44 seconds before retrying. On the free tier the token-per-minute limit, not the work, dominates the run time. Calls are now wrapped so waits are explicit and bounded.
-
-## API
-
-All routes are under `/api/v1` and need a logged-in user (cookie auth; see `/docs` for the auth routes).
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/investigations` | Start a run. Body: `repo_url`, optional `focus`. Returns `202` and the id |
-| GET | `/investigations` | Your recent runs |
-| GET | `/investigations/{id}` | Status, counters, error, and the report when finished |
-| GET | `/investigations/{id}/trace?after=N` | Trace rows after step N |
-| POST | `/investigations/{id}/resume` | Resume an `interrupted` or `failed` run. `409` if there is nothing to resume |
-
-Statuses: `pending`, `running`, `completed`, `failed`, `interrupted`.
-
-## Running it
-
-You need Python 3.12 or newer, Postgres, Redis, and a [Groq](https://console.groq.com) API key. A `GITHUB_TOKEN` is optional, but without one GitHub allows only 60 requests per hour.
-
-### With Docker
-
-```bash
-cp backend/.env.example backend/.env     # add GROQ_API_KEY, set the two token secrets
-docker compose up --build
-```
-
-This starts Postgres and Redis, applies the migrations, and serves the API on `http://localhost:8000` (docs at `/docs`).
-
-### Locally
-
-```bash
+To stop the services, press Ctrl+C. Then run docker compose down if needed. The named PostgreSQL volume is retained by default.
+Run Locally Without Docker
+The backend requires Python 3.12 or newer, PostgreSQL, Redis, and the environment variables described in .env.example.
 cd backend
-python -m venv .venv && source .venv/bin/activate    # on Windows: .venv\Scripts\activate
+python -m venv .venv
+Activate the environment:
+# macOS/Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+Install dependencies and configure the environment:
 pip install -r requirements.txt
-cp .env.example .env                                  # fill it in
+cp .env.example .env
+On Windows PowerShell, use Copy-Item .env.example .env instead of cp if needed. Fill in the required values, then run:
 alembic upgrade head
 uvicorn main:app
-```
-
-The checkpoint tables are created by LangGraph itself on startup, outside Alembic. `migrations/env.py` ignores tables that start with `checkpoint`, so `alembic check` stays clean.
-
-### Tests
-
-```bash
-cd backend && pytest -q
-```
-
-## Known limitations
-
-- **A crash re-runs the node that was in progress.** Its model call is paid for again, the tokens of the lost call are not counted, and a trace row can appear twice. The `resume` row marks the seam.
-- **Checkpoints depend on the shape of the state.** Changing the state can break resuming runs saved before the change. Treat checkpoints as disposable across deploys.
-- **Runs are FastAPI background tasks inside the API process.** A restart interrupts them (resume recovers them), and the startup cleanup assumes a single server process. A real queue and worker is the next step for scale.
-- **Reports are built from short findings, not from the code.** The model can add details it knows about a famous library but did not read. The report lists which files were read and its own limitations. Large files are read in parts, so a finding may describe only the part that was read.
-- **Overview mode does not read manifest files first**, so the tech stack can be thin.
-- **Free-tier model limits** make runs slow when the token-per-minute limit is hit.
-- **Each node adds database round trips** (trace row and checkpoint). On a remote database this is visible latency.
-- Public repositories only. No per-user quotas and no cancel endpoint yet.
-
-## What I would do next
-
-1. Read the README and the manifest (`pyproject.toml`, `package.json`, ...) in plain code right after `fetch_tree`, so overviews have a solid base.
-2. Check report claims against the findings and drop anything unsupported.
-3. Write trace rows in batches, and stream them to the client over SSE.
-4. Per-user quotas, cancel, and a queue with a separate worker.
-5. Make the model provider a config choice.
-
-## Stack
-
-FastAPI, SQLAlchemy (async) and Alembic, PostgreSQL, Redis, LangGraph with the Postgres checkpointer, `langchain-groq`, httpx, Pydantic.
-
-Built by Taha Yasin ([TahaY291](https://github.com/TahaY291)).#   g i t h u b _ r e p o _ a n a l y z e r  
- 
+LangGraph creates its checkpoint tables on startup, outside Alembic. migrations/env.py ignores tables beginning with checkpoint, so alembic check stays clean.
+Tests
+From the backend/ directory:
+pytest -q
+Known Limitations
+- A crash during a node causes that node to run again from the beginning. Its model call may be billed again, lost-call tokens are not counted, and a trace row may appear twice. The resume row marks the restart seam.
+- Checkpoints depend on the state shape. Changing the state can break resumes for older runs; treat checkpoints as disposable across deployments.
+- Runs use FastAPI background tasks inside the API process. A restart interrupts them, and startup cleanup assumes a single server process. A durable queue and separate worker would be the next scaling step.
+- Reports are built from findings, not directly from the entire repository. The model may add unsupported details about familiar libraries; the report lists files read and its limitations. Large files are read in parts, so a finding may describe only the part inspected.
+- Overview mode does not read manifest files first, so its technology-stack summary may be incomplete.
+- Free-tier model limits can make runs slow.
+- Each node adds database round trips for trace rows and checkpoints, which can add noticeable latency with a remote database.
+- Only public repositories are supported. Per-user quotas and a cancellation endpoint are not implemented yet.
+Possible Next Steps
+1. Read manifest files such as pyproject.toml and package.json after fetch_tree to improve overview reports.
+2. Check report claims against findings and remove unsupported statements.
+3. Batch trace writes and stream trace updates to clients over SSE.
+4. Add per-user quotas, cancellation, and a queue with a separate worker.
+5. Make the model provider configurable.
+Author
+Built by Taha Yasin.
